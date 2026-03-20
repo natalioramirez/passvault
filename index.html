@@ -637,6 +637,46 @@
             </div>
           </div>
 
+          <div
+            class="alert info show"
+            style="
+              margin-top: 12px;
+              background: rgba(255, 68, 102, 0.05);
+              border-color: rgba(255, 68, 102, 0.25);
+              color: #ff9999;
+            "
+          >
+            ⚠️ <strong>Security Note:</strong> The expiry time is a deterrence
+            technique only. A skilled person with both the URL and encryption
+            key can still decrypt the secret even after expiry. Expiry is not
+            cryptographically enforced.
+          </div>
+
+          <div class="field">
+            <label>Expiry time</label>
+            <select
+              id="encExpiry"
+              style="
+                width: 100%;
+                background: var(--bg);
+                border: 1px solid var(--border);
+                border-radius: 10px;
+                color: var(--text);
+                font-family: var(--mono);
+                font-size: 13px;
+                padding: 12px 16px;
+                outline: none;
+                cursor: pointer;
+                transition: border-color 0.2s;
+              "
+            >
+              <option value="1h">1 Hour</option>
+              <option value="24h" selected>24 Hours (default)</option>
+              <option value="1week">1 Week</option>
+              <option value="never">Never expires</option>
+            </select>
+          </div>
+
           <button class="btn btn-primary" onclick="encrypt()">
             🔒 Generate encrypted URL
           </button>
@@ -760,15 +800,32 @@
         return Uint8Array.from(atob(str), (c) => c.charCodeAt(0));
       }
 
-      async function encryptPayload(secret, password) {
+      async function encryptPayload(secret, password, expiry) {
         const salt = crypto.getRandomValues(new Uint8Array(16));
         const iv = crypto.getRandomValues(new Uint8Array(12));
         const key = await deriveKey(password, salt);
 
+        // Build payload with secret and optional expiry
+        let payload = secret;
+        if (expiry !== "never") {
+          const now = Math.floor(Date.now() / 1000); // current timestamp in seconds
+          let expirySeconds = null;
+          if (expiry === "1h") expirySeconds = 3600;
+          else if (expiry === "24h") expirySeconds = 86400;
+          else if (expiry === "1week") expirySeconds = 604800;
+
+          const expiryTime = now + expirySeconds;
+          const payloadObj = {
+            secret: secret,
+            expiry: expiryTime,
+          };
+          payload = JSON.stringify(payloadObj);
+        }
+
         const ciphertext = await crypto.subtle.encrypt(
           { name: "AES-GCM", iv },
           key,
-          enc.encode(secret),
+          enc.encode(payload),
         );
 
         // Pack: salt(16) + iv(12) + ciphertext
@@ -792,7 +849,26 @@
           key,
           ciphertext,
         );
-        return dec.decode(plaintext);
+
+        const decoded = dec.decode(plaintext);
+
+        // Try to parse as JSON payload with expiry
+        try {
+          const obj = JSON.parse(decoded);
+          if (obj.secret && obj.expiry) {
+            const now = Math.floor(Date.now() / 1000);
+            if (now > obj.expiry) {
+              throw new Error("Secret has expired");
+            }
+            return obj.secret;
+          }
+        } catch (e) {
+          // Not a JSON payload, or expired - if it's an expiry error, re-throw it
+          if (e.message === "Secret has expired") throw e;
+          // Otherwise treat as regular plaintext
+        }
+
+        return decoded;
       }
 
       // ============================================================
@@ -867,6 +943,7 @@
       async function encrypt() {
         const secret = document.getElementById("encSecret").value.trim();
         const key = document.getElementById("encKey").value;
+        const expiry = document.getElementById("encExpiry").value;
 
         if (!secret)
           return showAlert(
@@ -886,7 +963,7 @@
         hideAlert("encAlert");
 
         try {
-          const encoded = await encryptPayload(secret, key);
+          const encoded = await encryptPayload(secret, key, expiry);
           const url = `${location.origin}${location.pathname}#v=${encoded}`;
 
           document.getElementById("encUrl").textContent = url;
@@ -939,7 +1016,15 @@
             "success",
           );
         } catch (e) {
-          showAlert("decAlert", "❌ Wrong key or corrupted data.", "error");
+          if (e.message === "Secret has expired") {
+            showAlert(
+              "decAlert",
+              "❌ Secret has expired and cannot be accessed.",
+              "error",
+            );
+          } else {
+            showAlert("decAlert", "❌ Wrong key or corrupted data.", "error");
+          }
         }
       }
 
